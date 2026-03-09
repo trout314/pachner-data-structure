@@ -15,9 +15,10 @@ module pachner.triangulation;
 
 import pachner.simplex;
 
-import std.algorithm : canFind, max, reduce, remove, sort;
+import std.algorithm : canFind, countUntil, max, reduce, remove, sort, SwapStrategy;
 import std.array : array;
 import std.stdio : writefln;
+import std.typecons : Nullable, nullable;
 
 /**
  * A triangulation of a 3-manifold stored as a list of tetrahedra.
@@ -42,17 +43,71 @@ struct Triangulation(VertexLabel = size_t)
     size_t[VertexLabel] vertexDegrees;
     size_t[VertexLabel[2]] edgeDegrees;
 
+    /// Face index: face (sorted triple) → list of tet indices containing that face
+    size_t[][VertexLabel[3]] faceTets;
+
+    /// Parallel arrays for O(1) random access into index keys
+    VertexLabel[] vertexKeys;
+    size_t[VertexLabel] vertexKeyIndex;
+    VertexLabel[2][] edgeKeys;
+    size_t[VertexLabel[2]] edgeKeyIndex;
+    VertexLabel[3][] faceKeys;
+    size_t[VertexLabel[3]] faceKeyIndex;
+
     /// Running sums for variance computation (avoid full iteration)
     long vertexDegreeSum;
     long vertexDegreeSqSum;
     long edgeDegreeSum;
     long edgeDegreeSqSum;
 
-    /// Add a tetrahedron with the given vertex labels
+    /// Monotonically increasing counter for fresh vertex labels
+    static if (__traits(isIntegral, VertexLabel))
+        VertexLabel nextVertexCounter = 0;
+
+    /// Add a key to a parallel key array with swap-with-last support
+    private static void addKey(K)(ref K[] arr, ref size_t[K] index, K key)
+    {
+        index[key] = arr.length;
+        arr ~= key;
+    }
+
+    /// Remove a key from a parallel key array using swap-with-last
+    private static void removeKey(K)(ref K[] arr, ref size_t[K] index, K key)
+    {
+        auto pos = index[key];
+        auto lastPos = arr.length - 1;
+        if (pos != lastPos)
+        {
+            auto last = arr[lastPos];
+            arr[pos] = last;
+            index[last] = pos;
+        }
+        arr = arr[0 .. lastPos];
+        index.remove(key);
+    }
+
+    /// Add a tetrahedron with the given vertex labels.
+    /// Updates all indexes (face, degree maps, key arrays).
     size_t addTetrahedron(VertexLabel[4] verts)
     {
         size_t idx = tets.length;
         tets ~= Tet(verts);
+
+        // Update face index
+        auto tet = Tet(verts);
+        foreach (fi; 0 .. 4)
+        {
+            auto fk = tet.face(cast(ubyte) fi);
+            if (fk !in faceTets)
+                addKey(faceKeys, faceKeyIndex, fk);
+            faceTets[fk] ~= idx;
+        }
+
+        // Update degree maps
+        adjustDegrees(verts, +1);
+        nTriangles = faceTets.length;
+        nTetrahedra = tets.length;
+
         return idx;
     }
 
@@ -81,9 +136,16 @@ struct Triangulation(VertexLabel = size_t)
             vertexDegreeSqSum += newDeg * newDeg - oldDeg * oldDeg;
 
             if (newDeg > 0)
+            {
+                if (!p)
+                    addKey(vertexKeys, vertexKeyIndex, v);
                 vertexDegrees[v] = cast(size_t) newDeg;
+            }
             else if (p)
+            {
                 vertexDegrees.remove(v);
+                removeKey(vertexKeys, vertexKeyIndex, v);
+            }
         }
         nVertices = vertexDegrees.length;
 
@@ -100,9 +162,16 @@ struct Triangulation(VertexLabel = size_t)
                 edgeDegreeSqSum += newDeg * newDeg - oldDeg * oldDeg;
 
                 if (newDeg > 0)
+                {
+                    if (!p)
+                        addKey(edgeKeys, edgeKeyIndex, ek);
                     edgeDegrees[ek] = cast(size_t) newDeg;
+                }
                 else if (p)
+                {
                     edgeDegrees.remove(ek);
+                    removeKey(edgeKeys, edgeKeyIndex, ek);
+                }
             }
         nEdges = edgeDegrees.length;
     }
@@ -130,32 +199,48 @@ struct Triangulation(VertexLabel = size_t)
     {
         nTetrahedra = tets.length;
 
-        // Rebuild degree maps
+        // Clear all index structures
         vertexDegrees = typeof(vertexDegrees).init;
         edgeDegrees = typeof(edgeDegrees).init;
+        vertexKeys = null;
+        vertexKeyIndex = typeof(vertexKeyIndex).init;
+        edgeKeys = null;
+        edgeKeyIndex = typeof(edgeKeyIndex).init;
         vertexDegreeSum = 0;
         vertexDegreeSqSum = 0;
         edgeDegreeSum = 0;
         edgeDegreeSqSum = 0;
 
+        // Clear face index
+        faceTets = typeof(faceTets).init;
+        faceKeys = null;
+        faceKeyIndex = typeof(faceKeyIndex).init;
+
+        // Rebuild face index
+        foreach (i, ref t; tets)
+            foreach (fi; 0 .. 4)
+            {
+                auto fk = t.face(cast(ubyte) fi);
+                if (fk !in faceTets)
+                    addKey(faceKeys, faceKeyIndex, fk);
+                faceTets[fk] ~= i;
+            }
+
+        // Rebuild degree maps (also rebuilds vertexKeys/edgeKeys)
         foreach (ref t; tets)
             adjustDegrees(t.vertices, +1);
 
         // nVertices and nEdges are set by adjustDegrees
+        nTriangles = faceTets.length;
 
-        // Count distinct triangles (sorted triples)
-        VertexLabel[3][] triList;
-        foreach (ref t; tets)
-            foreach (v; 0 .. 4)
-            {
-                auto f = t.face(cast(ubyte) v);
-                bool found = false;
-                foreach (ref existing; triList)
-                    if (existing == f) { found = true; break; }
-                if (!found)
-                    triList ~= f;
-            }
-        nTriangles = triList.length;
+        // Update next vertex counter
+        static if (__traits(isIntegral, VertexLabel))
+        {
+            nextVertexCounter = 0;
+            foreach (v; vertexDegrees.byKey())
+                if (v >= nextVertexCounter)
+                    nextVertexCounter = cast(VertexLabel)(v + 1);
+        }
     }
 
     /// Order-independent equality: same set of tetrahedra (ignoring
@@ -179,9 +264,47 @@ struct Triangulation(VertexLabel = size_t)
     }
 
     /// Returns true if any tet (not in excludeIndices) contains all
-    /// the given vertex labels.
+    /// the given vertex labels. Uses indexes for O(1) lookups.
     bool hasSimplexContaining(const VertexLabel[] vertices, const size_t[] excludeIndices = null) const
     {
+        if (vertices.length == 1)
+        {
+            if (excludeIndices is null)
+                return (vertices[0] in vertexDegrees) !is null;
+            // Check if vertex exists in any non-excluded tet
+            auto p = vertices[0] in vertexDegrees;
+            if (p is null) return false;
+            // Need to check if all tets containing this vertex are excluded
+            // Fall through to linear scan for this rare case
+        }
+        else if (vertices.length == 2)
+        {
+            auto ek = edgeKey(vertices[0], vertices[1]);
+            auto p = ek in edgeDegrees;
+            if (p is null) return false;
+            if (excludeIndices is null) return true;
+            // Count how many excluded tets contain this edge
+            size_t excludedCount = 0;
+            foreach (idx; excludeIndices)
+                if (idx < tets.length && canFind(tets[idx].vertices[], vertices[0])
+                    && canFind(tets[idx].vertices[], vertices[1]))
+                    excludedCount++;
+            return *p > excludedCount;
+        }
+        else if (vertices.length == 3)
+        {
+            VertexLabel[3] fk = [vertices[0], vertices[1], vertices[2]];
+            sort(fk[]);
+            auto p = fk in faceTets;
+            if (p is null) return false;
+            if (excludeIndices is null) return (*p).length > 0;
+            foreach (tetIdx; *p)
+                if (!canFind(excludeIndices, tetIdx))
+                    return true;
+            return false;
+        }
+
+        // Fallback: linear scan
         foreach (i, ref t; tets)
         {
             if (excludeIndices !is null && canFind(excludeIndices, i))
@@ -196,12 +319,58 @@ struct Triangulation(VertexLabel = size_t)
         return false;
     }
 
-    /// Remove tetrahedron at the given index (swaps with last element)
+    /// Remove tetrahedron at the given index (swaps with last element).
+    /// Updates all indexes (face, degree maps, key arrays).
     void removeTetrahedron(size_t idx)
     in (idx < tets.length)
     {
-        tets[idx] = tets[$ - 1];
-        tets = tets[0 .. $ - 1];
+        size_t lastIdx = tets.length - 1;
+
+        // Update degree maps for removed tet
+        adjustDegrees(tets[idx].vertices, -1);
+
+        // Step 1: Remove idx from face index for the tet being deleted
+        foreach (fi; 0 .. 4)
+        {
+            auto fk = tets[idx].face(cast(ubyte) fi);
+            auto p = fk in faceTets;
+            if (p)
+            {
+                auto pos = countUntil(*p, idx);
+                if (pos >= 0)
+                {
+                    *p = (*p).remove(cast(size_t) pos);
+                    if ((*p).length == 0)
+                    {
+                        faceTets.remove(fk);
+                        removeKey(faceKeys, faceKeyIndex, fk);
+                    }
+                }
+            }
+        }
+
+        // Step 2: If not removing the last element, update lastIdx → idx in face index
+        if (idx != lastIdx)
+        {
+            foreach (fi; 0 .. 4)
+            {
+                auto fk = tets[lastIdx].face(cast(ubyte) fi);
+                auto p = fk in faceTets;
+                if (p)
+                {
+                    foreach (ref entry; *p)
+                        if (entry == lastIdx)
+                            entry = idx;
+                }
+            }
+        }
+
+        // Step 3: Swap and shrink
+        tets[idx] = tets[lastIdx];
+        tets = tets[0 .. lastIdx];
+
+        nTriangles = faceTets.length;
+        nTetrahedra = tets.length;
     }
 
     /**
@@ -224,7 +393,6 @@ struct Triangulation(VertexLabel = size_t)
             return [size_t.max, size_t.max, size_t.max, size_t.max];
 
         VertexLabel[4] orig = tets[tetIdx].vertices;
-        adjustDegrees(orig, -1);
         removeTetrahedron(tetIdx);
 
         size_t[4] newIndices;
@@ -233,12 +401,7 @@ struct Triangulation(VertexLabel = size_t)
             VertexLabel[4] verts = orig;
             verts[i] = v;
             newIndices[i] = addTetrahedron(verts);
-            adjustDegrees(verts, +1);
         }
-
-        // Triangle delta: +6 (6 new internal triangles containing v)
-        nTriangles += 6;
-        nTetrahedra = tets.length;
 
         return newIndices;
     }
@@ -285,10 +448,11 @@ struct Triangulation(VertexLabel = size_t)
                 return false;
         }
 
+        // Check that the replacement tet [outer] doesn't already exist as a surviving tet
+        if (hasSimplexContaining(outer, tetIndices))
+            return false;
+
         // Remove the 4 tets (remove from highest index first to preserve indices)
-        // Adjust degrees before removing
-        foreach (idx; tetIndices)
-            adjustDegrees(tets[idx].vertices, -1);
         sort!"a > b"(tetIndices);
         foreach (idx; tetIndices)
             removeTetrahedron(idx);
@@ -296,10 +460,6 @@ struct Triangulation(VertexLabel = size_t)
         // Add the single replacement tetrahedron
         VertexLabel[4] newVerts = outer[0 .. 4];
         addTetrahedron(newVerts);
-        adjustDegrees(newVerts, +1);
-
-        nTriangles -= 6;
-        nTetrahedra = tets.length;
 
         return true;
     }
@@ -350,10 +510,6 @@ struct Triangulation(VertexLabel = size_t)
         if (hasSimplexContaining([d, e], [tetIdx1, tetIdx2]))
             return false;
 
-        // Adjust degrees for removed tets
-        adjustDegrees(v1, -1);
-        adjustDegrees(v2, -1);
-
         // Remove both tets (higher index first)
         if (tetIdx1 > tetIdx2)
         {
@@ -377,11 +533,7 @@ struct Triangulation(VertexLabel = size_t)
             verts[2] = d;
             verts[3] = e;
             addTetrahedron(verts);
-            adjustDegrees(verts, +1);
         }
-
-        nTriangles += 2;
-        nTetrahedra = tets.length;
 
         return true;
     }
@@ -433,14 +585,6 @@ struct Triangulation(VertexLabel = size_t)
         if (hasSimplexContaining(outer, tetIndices))
             return false;
 
-        // Adjust degrees for removed tets
-        // Need to read vertices before sorting tetIndices
-        VertexLabel[4][3] removedVerts;
-        foreach (i, idx; tetIndices)
-            removedVerts[i] = tets[idx].vertices;
-        foreach (ref rv; removedVerts)
-            adjustDegrees(rv, -1);
-
         // Remove the 3 tets (highest index first)
         sort!"a > b"(tetIndices);
         foreach (idx; tetIndices)
@@ -450,39 +594,23 @@ struct Triangulation(VertexLabel = size_t)
         VertexLabel[4] newTet1 = [outer[0], outer[1], outer[2], d];
         VertexLabel[4] newTet2 = [outer[0], outer[1], outer[2], e];
         addTetrahedron(newTet1);
-        adjustDegrees(newTet1, +1);
         addTetrahedron(newTet2);
-        adjustDegrees(newTet2, +1);
-
-        nTriangles -= 2;
-        nTetrahedra = tets.length;
 
         return true;
     }
 
-    /// Returns a vertex label not currently used by any tetrahedron.
+    /// Returns a fresh vertex label not currently used. O(1).
     /// Only available for integral VertexLabel types.
     static if (__traits(isIntegral, VertexLabel))
-    VertexLabel nextVertexLabel() const
+    VertexLabel nextVertexLabel()
     {
-        if (tets.length == 0)
-            return 0;
-        VertexLabel maxLabel = tets[0].vertices[0];
-        foreach (ref t; tets)
-            foreach (v; t.vertices)
-                if (v > maxLabel)
-                    maxLabel = v;
-        return cast(VertexLabel)(maxLabel + 1);
+        return nextVertexCounter++;
     }
 
     /// Collect all distinct vertex labels used in the triangulation
     VertexLabel[] vertexLabels() const
     {
-        VertexLabel[] labels;
-        foreach (ref t; tets)
-            foreach (v; t.vertices)
-                if (!canFind(labels, v))
-                    labels ~= v;
+        auto labels = vertexDegrees.keys;
         sort(labels);
         return labels;
     }
@@ -490,144 +618,143 @@ struct Triangulation(VertexLabel = size_t)
     /// Collect all distinct edges (pairs of vertex labels) in the triangulation
     VertexLabel[2][] edges() const
     {
-        VertexLabel[2][] result;
-        foreach (ref t; tets)
-        {
-            foreach (i; 0 .. 4)
-                foreach (j; i + 1 .. 4)
-                {
-                    VertexLabel[2] edge = [t.vertices[i], t.vertices[j]];
-                    sort(edge[]);
-                    bool found = false;
-                    foreach (ref e; result)
-                        if (e == edge) { found = true; break; }
-                    if (!found)
-                        result ~= edge;
-                }
-        }
-        return result;
+        return edgeDegrees.keys;
     }
 
     /**
      * Returns all valid Pachner moves for the current triangulation.
-     *
-     * Each move is represented as a PachnerMove tagged union that
-     * records the move type and its parameters.
+     * Uses face/edge/vertex indexes for efficiency.
      */
     PachnerMove!VertexLabel[] validMoves() const
     {
         PachnerMove!VertexLabel[] moves;
 
         // 1-4 moves: one per tetrahedron (always valid since we use a fresh vertex)
-        // Only available for integral vertex label types
         static if (__traits(isIntegral, VertexLabel))
         {
-            VertexLabel fresh = nextVertexLabel();
+            VertexLabel fresh = nextVertexCounter;
             foreach (i; 0 .. tets.length)
-            {
                 moves ~= PachnerMove!VertexLabel.make14(i, fresh);
-            }
         }
 
-        // 2-3 moves: for each pair of tets sharing exactly 3 vertices
-        foreach (i; 0 .. tets.length)
-            foreach (j; i + 1 .. tets.length)
-            {
-                auto v1 = tets[i].vertices;
-                auto v2 = tets[j].vertices;
-
-                VertexLabel[] common;
-                foreach (u; v1)
-                    if (canFind(v2[], u) && !canFind(common, u))
-                        common ~= u;
-
-                if (common.length != 3)
-                    continue;
-
-                // Find non-shared vertices
-                VertexLabel d, e;
-                foreach (u; v1)
-                    if (!canFind(common, u)) d = u;
-                foreach (u; v2)
-                    if (!canFind(common, u)) e = u;
-
-                // Check validity: edge [d,e] must not exist in surviving tets
-                if (!hasSimplexContaining([d, e], [i, j]))
-                    moves ~= PachnerMove!VertexLabel.make23(i, j, common[0 .. 3], d, e);
-            }
-
-        // 3-2 moves: for each edge with exactly 3 tets around it
-        auto allEdges = edges();
-        foreach (ref edge; allEdges)
+        // 2-3 moves: iterate faces with exactly 2 tets
+        foreach (ref kv; faceTets.byKeyValue())
         {
-            size_t[] tetIndices;
-            foreach (i, ref t; tets)
-                if (canFind(t.vertices[], edge[0]) && canFind(t.vertices[], edge[1]))
-                    tetIndices ~= i;
-
-            if (tetIndices.length != 3)
+            if (kv.value.length != 2)
                 continue;
+            auto i = kv.value[0];
+            auto j = kv.value[1];
+            auto face = kv.key;
+
+            // Find non-shared vertex from each tet
+            VertexLabel d, e;
+            foreach (u; tets[i].vertices)
+                if (!canFind(face[], u)) { d = u; break; }
+            foreach (u; tets[j].vertices)
+                if (!canFind(face[], u)) { e = u; break; }
+
+            // Check validity: edge [d,e] must not exist in any tet
+            // (tets i,j have vertices [a,b,c,d] and [a,b,c,e], neither contains both d and e)
+            auto ek = edgeKey(d, e);
+            if (ek !in edgeDegrees)
+                moves ~= PachnerMove!VertexLabel.make23(i, j, face, d, e);
+        }
+
+        // 3-2 moves: iterate edges with degree exactly 3
+        foreach (ref kv; edgeDegrees.byKeyValue())
+        {
+            if (kv.value != 3)
+                continue;
+            auto edge = kv.key;
+
+            // Find the 3 tets containing this edge
+            size_t[3] tetIndices;
+            size_t count = 0;
+            foreach (i, ref t; tets)
+            {
+                if (canFind(t.vertices[], edge[0]) && canFind(t.vertices[], edge[1]))
+                {
+                    if (count < 3) tetIndices[count] = i;
+                    count++;
+                }
+            }
+            if (count != 3) continue;
 
             // Collect outer vertices
-            VertexLabel[] outer;
+            VertexLabel[3] outer;
+            size_t outerCount = 0;
             foreach (idx; tetIndices)
                 foreach (u; tets[idx].vertices)
-                    if (u != edge[0] && u != edge[1] && !canFind(outer, u))
-                        outer ~= u;
+                    if (u != edge[0] && u != edge[1] && !canFind(outer[0 .. outerCount], u))
+                        outer[outerCount++] = u;
 
-            if (outer.length != 3)
-                continue;
-
-            // Verify each tet has exactly 2 outer vertices
-            bool valid = true;
-            foreach (idx; tetIndices)
-            {
-                int outerCount = 0;
-                foreach (u; tets[idx].vertices)
-                    if (canFind(outer, u))
-                        outerCount++;
-                if (outerCount != 2) { valid = false; break; }
-            }
-            if (!valid) continue;
+            if (outerCount != 3) continue;
 
             // Check validity: face [a,b,c] must not exist in surviving tets
-            if (!hasSimplexContaining(outer, tetIndices))
-                moves ~= PachnerMove!VertexLabel.make32(edge, outer[0 .. 3]);
+            VertexLabel[3] fk = outer;
+            sort(fk[]);
+            auto fp = fk in faceTets;
+            if (fp is null)
+            {
+                moves ~= PachnerMove!VertexLabel.make32(edge, outer);
+            }
+            else
+            {
+                // Check if all tets with this face are among the 3 being removed
+                bool survivorHasFace = false;
+                foreach (tetIdx; *fp)
+                    if (tetIdx != tetIndices[0] && tetIdx != tetIndices[1] && tetIdx != tetIndices[2])
+                        { survivorHasFace = true; break; }
+                if (!survivorHasFace)
+                    moves ~= PachnerMove!VertexLabel.make32(edge, outer);
+            }
         }
 
-        // 4-1 moves: for each vertex with exactly 4 tets around it
-        auto allVerts = vertexLabels();
-        foreach (v; allVerts)
+        // 4-1 moves: iterate vertices with degree exactly 4
+        foreach (ref kv; vertexDegrees.byKeyValue())
         {
-            size_t[] tetIndices;
+            if (kv.value != 4)
+                continue;
+            auto v = kv.key;
+
+            // Find the 4 tets containing this vertex
+            size_t[4] tetIndices;
+            size_t count = 0;
             foreach (i, ref t; tets)
                 if (canFind(t.vertices[], v))
-                    tetIndices ~= i;
+                {
+                    if (count < 4) tetIndices[count] = i;
+                    count++;
+                }
+            if (count != 4) continue;
 
-            if (tetIndices.length != 4)
-                continue;
-
-            VertexLabel[] outer;
+            // Collect outer vertices
+            VertexLabel[4] outer;
+            size_t outerCount = 0;
             foreach (idx; tetIndices)
                 foreach (u; tets[idx].vertices)
-                    if (u != v && !canFind(outer, u))
-                        outer ~= u;
+                    if (u != v && !canFind(outer[0 .. outerCount], u))
+                        outer[outerCount++] = u;
 
-            if (outer.length != 4)
-                continue;
+            if (outerCount != 4) continue;
 
+            // Verify each tet has exactly 3 outer vertices
             bool valid = true;
             foreach (idx; tetIndices)
             {
-                int outerCount = 0;
+                int oc = 0;
                 foreach (u; tets[idx].vertices)
-                    if (canFind(outer, u))
-                        outerCount++;
-                if (outerCount != 3) { valid = false; break; }
+                    if (canFind(outer[], u))
+                        oc++;
+                if (oc != 3) { valid = false; break; }
             }
             if (!valid) continue;
 
-            moves ~= PachnerMove!VertexLabel.make41(v, outer[0 .. 4]);
+            // Check that replacement tet [outer] doesn't already exist as a surviving tet
+            if (hasSimplexContaining(outer[], tetIndices[]))
+                continue;
+
+            moves ~= PachnerMove!VertexLabel.make41(v, outer);
         }
 
         return moves;
@@ -648,7 +775,176 @@ struct Triangulation(VertexLabel = size_t)
         copy.vertexDegreeSqSum = vertexDegreeSqSum;
         copy.edgeDegreeSum = edgeDegreeSum;
         copy.edgeDegreeSqSum = edgeDegreeSqSum;
+
+        // Deep copy face index
+        foreach (ref kv; faceTets.byKeyValue())
+            copy.faceTets[kv.key] = kv.value.dup;
+
+        // Copy parallel key arrays
+        copy.vertexKeys = vertexKeys.dup;
+        copy.vertexKeyIndex = cast(size_t[VertexLabel]) vertexKeyIndex.dup;
+        copy.edgeKeys = edgeKeys.dup;
+        copy.edgeKeyIndex = cast(size_t[VertexLabel[2]]) edgeKeyIndex.dup;
+        copy.faceKeys = faceKeys.dup;
+        copy.faceKeyIndex = cast(size_t[VertexLabel[3]]) faceKeyIndex.dup;
+
+        static if (__traits(isIntegral, VertexLabel))
+            copy.nextVertexCounter = nextVertexCounter;
+
         return copy;
+    }
+
+    /**
+     * Propose a random Pachner move in O(1) expected time.
+     *
+     * Picks a move type weighted by candidate pool sizes, then picks
+     * a random candidate. Returns null if the candidate is invalid
+     * (caller should treat as a rejected step in Metropolis).
+     *
+     * Pool sizes: 1-4 = nTets, 2-3 = nFaces, 3-2 = nEdges, 4-1 = nVertices.
+     * Within each pool, a random element is selected and checked for validity.
+     */
+    Nullable!(PachnerMove!VertexLabel) proposeMove(Rng)(ref Rng rng)
+    {
+        import std.random : uniform;
+        alias PM = PachnerMove!VertexLabel;
+
+        static if (__traits(isIntegral, VertexLabel))
+            size_t n14 = tets.length;
+        else
+            size_t n14 = 0;
+
+        size_t n23 = faceKeys.length;
+        size_t n32 = edgeKeys.length;
+        size_t n41 = vertexKeys.length;
+        size_t total = n14 + n23 + n32 + n41;
+
+        if (total == 0)
+            return typeof(return).init;
+
+        auto pick = uniform(0, total, rng);
+
+        if (pick < n14)
+        {
+            // 1-4 move: pick random tet (always valid)
+            static if (__traits(isIntegral, VertexLabel))
+            {
+                auto tetIdx = uniform(0, tets.length, rng);
+                return nullable(PM.make14(tetIdx, nextVertexLabel()));
+            }
+        }
+        else if (pick < n14 + n23)
+        {
+            // 2-3 move: pick random face, check if it has exactly 2 tets
+            auto fk = faceKeys[uniform(0, faceKeys.length, rng)];
+            auto p = fk in faceTets;
+            if (p is null || (*p).length != 2)
+                return typeof(return).init;
+
+            auto i = (*p)[0];
+            auto j = (*p)[1];
+
+            // Find non-shared vertices
+            VertexLabel d, e;
+            foreach (u; tets[i].vertices)
+                if (!canFind(fk[], u)) { d = u; break; }
+            foreach (u; tets[j].vertices)
+                if (!canFind(fk[], u)) { e = u; break; }
+
+            // Check validity: edge [d,e] must not exist
+            auto ek = edgeKey(d, e);
+            if (ek in edgeDegrees)
+                return typeof(return).init;
+
+            return nullable(PM.make23(i, j, fk, d, e));
+        }
+        else if (pick < n14 + n23 + n32)
+        {
+            // 3-2 move: pick random edge, check degree == 3
+            auto edge = edgeKeys[uniform(0, edgeKeys.length, rng)];
+            auto degP = edge in edgeDegrees;
+            if (degP is null || *degP != 3)
+                return typeof(return).init;
+
+            // Find the 3 tets containing this edge
+            size_t[3] tetIndices;
+            size_t count = 0;
+            foreach (i, ref t; tets)
+                if (canFind(t.vertices[], edge[0]) && canFind(t.vertices[], edge[1]))
+                {
+                    if (count < 3) tetIndices[count] = i;
+                    count++;
+                }
+            if (count != 3) return typeof(return).init;
+
+            // Collect outer vertices
+            VertexLabel[3] outer;
+            size_t outerCount = 0;
+            foreach (idx; tetIndices)
+                foreach (u; tets[idx].vertices)
+                    if (u != edge[0] && u != edge[1] && !canFind(outer[0 .. outerCount], u))
+                        outer[outerCount++] = u;
+            if (outerCount != 3) return typeof(return).init;
+
+            // Check validity: face [a,b,c] must not exist in surviving tets
+            VertexLabel[3] fk = outer;
+            sort(fk[]);
+            auto fp = fk in faceTets;
+            if (fp !is null)
+            {
+                foreach (tetIdx; *fp)
+                    if (tetIdx != tetIndices[0] && tetIdx != tetIndices[1] && tetIdx != tetIndices[2])
+                        return typeof(return).init;
+            }
+
+            return nullable(PM.make32(edge, outer));
+        }
+        else
+        {
+            // 4-1 move: pick random vertex, check degree == 4
+            auto v = vertexKeys[uniform(0, vertexKeys.length, rng)];
+            auto degP = v in vertexDegrees;
+            if (degP is null || *degP != 4)
+                return typeof(return).init;
+
+            // Find the 4 tets containing this vertex
+            size_t[4] tetIndices;
+            size_t count = 0;
+            foreach (i, ref t; tets)
+                if (canFind(t.vertices[], v))
+                {
+                    if (count < 4) tetIndices[count] = i;
+                    count++;
+                }
+            if (count != 4) return typeof(return).init;
+
+            // Collect outer vertices
+            VertexLabel[4] outer;
+            size_t outerCount = 0;
+            foreach (idx; tetIndices)
+                foreach (u; tets[idx].vertices)
+                    if (u != v && !canFind(outer[0 .. outerCount], u))
+                        outer[outerCount++] = u;
+            if (outerCount != 4) return typeof(return).init;
+
+            // Verify each tet has exactly 3 outer vertices
+            foreach (idx; tetIndices)
+            {
+                int oc = 0;
+                foreach (u; tets[idx].vertices)
+                    if (canFind(outer[], u))
+                        oc++;
+                if (oc != 3) return typeof(return).init;
+            }
+
+            // Check that replacement tet [outer] doesn't already exist
+            if (hasSimplexContaining(outer[], tetIndices[]))
+                return typeof(return).init;
+
+            return nullable(PM.make41(v, outer));
+        }
+
+        return typeof(return).init;
     }
 
     /// Pretty-print summary
@@ -1252,7 +1548,7 @@ unittest
             move.newVertex = tri.nextVertexLabel();
 
         bool ok = move.execute(tri);
-        assert(ok, "Move execution failed at step " ~ (cast(int) step).stringof);
+        assert(ok, "Move execution failed");
         history ~= move;
     }
 
@@ -1265,4 +1561,115 @@ unittest
     }
 
     assert(tri == original, "Triangulation not recovered after undoing all moves");
+}
+
+unittest
+{
+    import std.random : Random, uniform;
+
+    // Test proposeMove: every non-null proposal must be executable
+    // and must correspond to a valid move.
+    auto tri = fourSimplexBoundary();
+    auto rng = Random(77);
+    alias Move = PachnerMove!size_t;
+
+    size_t proposals = 0;
+    size_t accepted = 0;
+
+    foreach (step; 0 .. 500)
+    {
+        // Get all valid moves for comparison
+        auto allValid = tri.validMoves();
+        assert(allValid.length > 0);
+
+        // Try proposing
+        auto proposed = tri.proposeMove(rng);
+        proposals++;
+
+        if (!proposed.isNull)
+        {
+            auto move = proposed.get;
+
+            // Verify the move executes successfully on a copy
+            auto copy = tri.dup;
+            if (move.type == Move.Type.move14)
+                move.newVertex = copy.nextVertexLabel();
+            bool ok = move.execute(copy);
+            assert(ok, "Proposed move failed to execute");
+
+            // Execute on the real triangulation
+            if (move.type == Move.Type.move14)
+                move.newVertex = tri.nextVertexLabel();
+            ok = move.execute(tri);
+            assert(ok);
+            accepted++;
+
+            // Verify consistency
+            auto v = tri.nVertices;
+            auto e = tri.nEdges;
+            auto f = tri.nTriangles;
+            auto t = tri.nTetrahedra;
+            tri.recount();
+            assert(tri.nVertices == v);
+            assert(tri.nEdges == e);
+            assert(tri.nTriangles == f);
+            assert(tri.nTetrahedra == t);
+        }
+        else
+        {
+            // Null proposal = rejected step, pick from validMoves instead
+            auto idx = uniform(0, allValid.length, rng);
+            auto move = allValid[idx];
+            if (move.type == Move.Type.move14)
+                move.newVertex = tri.nextVertexLabel();
+            move.execute(tri);
+        }
+    }
+
+    // Should have accepted a reasonable fraction of proposals
+    assert(accepted > 50, "Too few proposals accepted");
+}
+
+unittest
+{
+    import std.random : Random, uniform;
+    import std.math : abs;
+
+    // Test face index consistency through random walk
+    auto tri = fourSimplexBoundary();
+    auto rng = Random(55);
+    alias Move = PachnerMove!size_t;
+
+    foreach (step; 0 .. 200)
+    {
+        auto moves = tri.validMoves();
+        auto idx = uniform(0, moves.length, rng);
+        auto move = moves[idx];
+        if (move.type == Move.Type.move14)
+            move.newVertex = tri.nextVertexLabel();
+        move.execute(tri);
+
+        // Verify face index matches brute-force
+        size_t[][size_t[3]] expectedFaces;
+        foreach (i, ref t; tri.tets)
+            foreach (fi; 0 .. 4)
+            {
+                auto fk = t.face(cast(ubyte) fi);
+                expectedFaces[fk] ~= i;
+            }
+
+        assert(tri.faceTets.length == expectedFaces.length,
+            "Face index size mismatch");
+        assert(tri.nTriangles == expectedFaces.length,
+            "nTriangles mismatch");
+        assert(tri.faceKeys.length == expectedFaces.length,
+            "faceKeys size mismatch");
+
+        // Verify degree tracking
+        auto vVar = tri.vertexDegreeVariance();
+        auto eVar = tri.edgeDegreeVariance();
+        tri.recount();
+        assert(abs(tri.vertexDegreeVariance() - vVar) < 1e-10);
+        assert(abs(tri.edgeDegreeVariance() - eVar) < 1e-10);
+    }
 }
