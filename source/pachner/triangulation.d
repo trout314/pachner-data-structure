@@ -63,6 +63,24 @@ struct Triangulation(VertexLabel = size_t)
         return true;
     }
 
+    /// Returns true if any tet (not in excludeIndices) contains all
+    /// the given vertex labels.
+    bool hasSimplexContaining(const VertexLabel[] vertices, const size_t[] excludeIndices = null) const
+    {
+        foreach (i, ref t; tets)
+        {
+            if (excludeIndices !is null && canFind(excludeIndices, i))
+                continue;
+            bool allFound = true;
+            foreach (v; vertices)
+                if (!canFind(t.vertices[], v))
+                    { allFound = false; break; }
+            if (allFound)
+                return true;
+        }
+        return false;
+    }
+
     /// Remove tetrahedron at the given index (swaps with last element)
     void removeTetrahedron(size_t idx)
     in (idx < tets.length)
@@ -86,6 +104,10 @@ struct Triangulation(VertexLabel = size_t)
     size_t[4] move14(size_t tetIdx, VertexLabel v)
     in (tetIdx < tets.length)
     {
+        // Check that v is not already a vertex of any existing tet
+        if (hasSimplexContaining([v]))
+            return [size_t.max, size_t.max, size_t.max, size_t.max];
+
         VertexLabel[4] orig = tets[tetIdx].vertices;
         removeTetrahedron(tetIdx);
 
@@ -194,6 +216,10 @@ struct Triangulation(VertexLabel = size_t)
         if (!foundD || !foundE)
             return false;
 
+        // Check that no surviving tet contains edge [d, e]
+        if (hasSimplexContaining([d, e], [tetIdx1, tetIdx2]))
+            return false;
+
         // Remove both tets (higher index first)
         if (tetIdx1 > tetIdx2)
         {
@@ -264,6 +290,10 @@ struct Triangulation(VertexLabel = size_t)
             if (outerCount != 2)
                 return false;
         }
+
+        // Check that no surviving tet contains face [a, b, c]
+        if (hasSimplexContaining(outer, tetIndices))
+            return false;
 
         // Remove the 3 tets (highest index first)
         sort!"a > b"(tetIndices);
@@ -452,6 +482,39 @@ unittest
     Triangulation!size_t tri;
     tri.addTetrahedron([0, 1, 2, 3]);
     assert(!tri.move32(2, 3)); // edge (2,3) is in only 1 tet
+}
+
+unittest
+{
+    // 1-4 move should fail if vertex already exists
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    auto result = tri.move14(0, 3); // vertex 3 already in use
+    assert(result == [size_t.max, size_t.max, size_t.max, size_t.max]);
+    assert(tri.size == 1); // triangulation unchanged
+}
+
+unittest
+{
+    // 2-3 move should fail if edge [d,e] already exists in a surviving tet
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    tri.addTetrahedron([0, 1, 2, 4]);
+    tri.addTetrahedron([0, 3, 4, 5]); // surviving tet contains edge [3,4]
+    assert(!tri.move23(0, 1)); // would create edge [3,4] which already exists
+    assert(tri.size == 3); // triangulation unchanged
+}
+
+unittest
+{
+    // 3-2 move should fail if face [a,b,c] already exists in a surviving tet
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 3, 4]);
+    tri.addTetrahedron([0, 2, 3, 4]);
+    tri.addTetrahedron([1, 2, 3, 4]);
+    tri.addTetrahedron([0, 1, 2, 5]); // surviving tet contains face [0,1,2]
+    assert(!tri.move32(3, 4)); // would create face [0,1,2] which already exists
+    assert(tri.size == 4); // triangulation unchanged
 }
 
 unittest
