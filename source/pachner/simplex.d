@@ -34,6 +34,27 @@ struct Tetrahedron(VertexLabel = size_t)
         return f;
     }
 
+    /// Returns a copy of the vertex labels in sorted order
+    VertexLabel[4] sortedVertices() const
+    {
+        VertexLabel[4] s = vertices;
+        sort(s[]);
+        return s;
+    }
+
+    /// Compare by sorted vertex labels (order-independent)
+    int opCmp(ref const Tetrahedron rhs) const
+    {
+        auto a = sortedVertices();
+        auto b = rhs.sortedVertices();
+        foreach (i; 0 .. 4)
+        {
+            if (a[i] < b[i]) return -1;
+            if (a[i] > b[i]) return 1;
+        }
+        return 0;
+    }
+
     /// Returns all 4 faces (each as sorted vertex labels)
     VertexLabel[3][4] faces() const
     {

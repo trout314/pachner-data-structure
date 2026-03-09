@@ -16,6 +16,7 @@ module pachner.triangulation;
 import pachner.simplex;
 
 import std.algorithm : canFind, remove, sort;
+import std.array : array;
 import std.stdio : writefln;
 
 /**
@@ -41,6 +42,26 @@ struct Triangulation(VertexLabel = size_t)
 
     /// Number of tetrahedra
     size_t size() const { return tets.length; }
+
+    /// Order-independent equality: same set of tetrahedra (ignoring
+    /// vertex order within each tet and tet order in the list)
+    bool opEquals(ref const Triangulation rhs) const
+    {
+        if (tets.length != rhs.tets.length)
+            return false;
+
+        // Sort copies of both tet lists by sorted vertex labels
+        auto a = tets.dup;
+        auto b = rhs.tets.dup;
+        sort(a);
+        sort(b);
+
+        foreach (i; 0 .. a.length)
+            if (a[i].sortedVertices() != b[i].sortedVertices())
+                return false;
+
+        return true;
+    }
 
     /// Remove tetrahedron at the given index (swaps with last element)
     void removeTetrahedron(size_t idx)
@@ -193,23 +214,17 @@ unittest
 
 unittest
 {
-    // 4-1 move: four tets become one (round-trip with 1-4)
+    // 4-1 move: round-trip with 1-4 recovers original triangulation
     Triangulation!size_t tri;
     tri.addTetrahedron([0, 1, 2, 3]);
+
+    Triangulation!size_t original = tri;
     tri.move14(0, 4);
     assert(tri.size == 4);
 
     bool ok = tri.move41(4);
     assert(ok);
-    assert(tri.size == 1);
-
-    // The remaining tet should have exactly the original 4 vertices
-    VertexLabel[] verts;
-    foreach (u; tri.tets[0].vertices)
-        if (!canFind(verts, u))
-            verts ~= u;
-    sort(verts);
-    assert(verts == [0, 1, 2, 3]);
+    assert(tri == original);
 }
 
 unittest
@@ -220,4 +235,32 @@ unittest
     assert(!tri.move41(0)); // vertex 0 is in only 1 tet
 }
 
-private alias VertexLabel = size_t; // for unittest visibility
+unittest
+{
+    // opEquals: same tets in different order are equal
+    Triangulation!size_t a, b;
+    a.addTetrahedron([0, 1, 2, 3]);
+    a.addTetrahedron([0, 1, 2, 4]);
+
+    b.addTetrahedron([0, 1, 2, 4]);
+    b.addTetrahedron([0, 1, 2, 3]);
+    assert(a == b);
+}
+
+unittest
+{
+    // opEquals: same tet with different vertex order are equal
+    Triangulation!size_t a, b;
+    a.addTetrahedron([0, 1, 2, 3]);
+    b.addTetrahedron([3, 2, 1, 0]);
+    assert(a == b);
+}
+
+unittest
+{
+    // opEquals: different tets are not equal
+    Triangulation!size_t a, b;
+    a.addTetrahedron([0, 1, 2, 3]);
+    b.addTetrahedron([0, 1, 2, 4]);
+    assert(a != b);
+}
