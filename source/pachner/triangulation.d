@@ -32,6 +32,12 @@ struct Triangulation(VertexLabel = size_t)
     /// All tetrahedra in the triangulation
     Tet[] tets;
 
+    /// f-vector: counts of distinct simplices of each dimension
+    size_t nVertices;
+    size_t nEdges;
+    size_t nTriangles;
+    size_t nTetrahedra;
+
     /// Add a tetrahedron with the given vertex labels
     size_t addTetrahedron(VertexLabel[4] verts)
     {
@@ -42,6 +48,51 @@ struct Triangulation(VertexLabel = size_t)
 
     /// Number of tetrahedra
     size_t size() const { return tets.length; }
+
+    /// Recompute f-vector counts from scratch by enumerating all
+    /// distinct vertices, edges, and triangles across all tetrahedra.
+    void recount()
+    {
+        nTetrahedra = tets.length;
+
+        // Count distinct vertices
+        VertexLabel[] verts;
+        foreach (ref t; tets)
+            foreach (v; t.vertices)
+                if (!canFind(verts, v))
+                    verts ~= v;
+        nVertices = verts.length;
+
+        // Count distinct edges (sorted pairs)
+        VertexLabel[2][] edgeList;
+        foreach (ref t; tets)
+            foreach (i; 0 .. 4)
+                foreach (j; i + 1 .. 4)
+                {
+                    VertexLabel[2] e = [t.vertices[i], t.vertices[j]];
+                    sort(e[]);
+                    bool found = false;
+                    foreach (ref existing; edgeList)
+                        if (existing == e) { found = true; break; }
+                    if (!found)
+                        edgeList ~= e;
+                }
+        nEdges = edgeList.length;
+
+        // Count distinct triangles (sorted triples)
+        VertexLabel[3][] triList;
+        foreach (ref t; tets)
+            foreach (v; 0 .. 4)
+            {
+                auto f = t.face(cast(ubyte) v);
+                bool found = false;
+                foreach (ref existing; triList)
+                    if (existing == f) { found = true; break; }
+                if (!found)
+                    triList ~= f;
+            }
+        nTriangles = triList.length;
+    }
 
     /// Order-independent equality: same set of tetrahedra (ignoring
     /// vertex order within each tet and tet order in the list)
@@ -118,6 +169,13 @@ struct Triangulation(VertexLabel = size_t)
             verts[i] = v;
             newIndices[i] = addTetrahedron(verts);
         }
+
+        // f-vector delta: +1 vertex, +4 edges, +6 triangles, +3 tets
+        nVertices += 1;
+        nEdges += 4;
+        nTriangles += 6;
+        nTetrahedra += 3;
+
         return newIndices;
     }
 
@@ -170,6 +228,12 @@ struct Triangulation(VertexLabel = size_t)
 
         // Add the single replacement tetrahedron
         addTetrahedron(outer[0 .. 4]);
+
+        // f-vector delta: -1 vertex, -4 edges, -6 triangles, -3 tets
+        nVertices -= 1;
+        nEdges -= 4;
+        nTriangles -= 6;
+        nTetrahedra -= 3;
 
         return true;
     }
@@ -245,6 +309,11 @@ struct Triangulation(VertexLabel = size_t)
             addTetrahedron(verts);
         }
 
+        // f-vector delta: +0 vertices, +1 edge, +2 triangles, +1 tet
+        nEdges += 1;
+        nTriangles += 2;
+        nTetrahedra += 1;
+
         return true;
     }
 
@@ -303,6 +372,11 @@ struct Triangulation(VertexLabel = size_t)
         // Add 2 new tets
         addTetrahedron([outer[0], outer[1], outer[2], d]);
         addTetrahedron([outer[0], outer[1], outer[2], e]);
+
+        // f-vector delta: +0 vertices, -1 edge, -2 triangles, -1 tet
+        nEdges -= 1;
+        nTriangles -= 2;
+        nTetrahedra -= 1;
 
         return true;
     }
@@ -485,13 +559,18 @@ struct Triangulation(VertexLabel = size_t)
     {
         Triangulation copy;
         copy.tets = tets.dup;
+        copy.nVertices = nVertices;
+        copy.nEdges = nEdges;
+        copy.nTriangles = nTriangles;
+        copy.nTetrahedra = nTetrahedra;
         return copy;
     }
 
     /// Pretty-print summary
     void print() const
     {
-        writefln("Triangulation: %d tetrahedra", tets.length);
+        writefln("Triangulation: %d vertices, %d edges, %d triangles, %d tetrahedra",
+            nVertices, nEdges, nTriangles, nTetrahedra);
         foreach (i, ref t; tets)
         {
             writefln("  Tet %d: %s", i, t.vertices);
@@ -883,6 +962,7 @@ Triangulation!size_t fourSimplexBoundary()
     tri.addTetrahedron([0, 1, 3, 4]);
     tri.addTetrahedron([0, 1, 2, 4]);
     tri.addTetrahedron([0, 1, 2, 3]);
+    tri.recount();
     return tri;
 }
 
@@ -893,9 +973,98 @@ unittest
     assert(tri.size == 5);
     assert(tri.vertexLabels() == [0, 1, 2, 3, 4]);
 
+    // f-vector of boundary of 4-simplex: 5 vertices, 10 edges, 10 triangles, 5 tets
+    assert(tri.nVertices == 5);
+    assert(tri.nEdges == 10);
+    assert(tri.nTriangles == 10);
+    assert(tri.nTetrahedra == 5);
+
     // Should have valid moves available
     auto moves = tri.validMoves();
     assert(moves.length > 0);
+}
+
+unittest
+{
+    // f-vector is maintained correctly through 1-4 and 4-1 moves
+    auto tri = fourSimplexBoundary();
+
+    tri.move14(0, 5);
+    assert(tri.nVertices == 6);
+    assert(tri.nEdges == 14);
+    assert(tri.nTriangles == 16);
+    assert(tri.nTetrahedra == 8);
+    tri.recount();
+    assert(tri.nVertices == 6);
+    assert(tri.nEdges == 14);
+    assert(tri.nTriangles == 16);
+    assert(tri.nTetrahedra == 8);
+
+    tri.move41(5);
+    assert(tri.nVertices == 5);
+    assert(tri.nEdges == 10);
+    assert(tri.nTriangles == 10);
+    assert(tri.nTetrahedra == 5);
+}
+
+unittest
+{
+    // f-vector is maintained correctly through 2-3 and 3-2 moves
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    tri.addTetrahedron([0, 1, 2, 4]);
+    tri.recount();
+    assert(tri.nVertices == 5);
+    assert(tri.nEdges == 9);
+    assert(tri.nTriangles == 7);
+    assert(tri.nTetrahedra == 2);
+
+    tri.move23(0, 1);
+    assert(tri.nVertices == 5);
+    assert(tri.nEdges == 10);
+    assert(tri.nTriangles == 9);
+    assert(tri.nTetrahedra == 3);
+    // Verify against recount
+    tri.recount();
+    assert(tri.nEdges == 10);
+    assert(tri.nTriangles == 9);
+
+    tri.move32(3, 4);
+    assert(tri.nVertices == 5);
+    assert(tri.nEdges == 9);
+    assert(tri.nTriangles == 7);
+    assert(tri.nTetrahedra == 2);
+}
+
+unittest
+{
+    import std.random : Random, uniform;
+
+    // Verify f-vector stays consistent with recount() through random walk
+    auto tri = fourSimplexBoundary();
+    auto rng = Random(123);
+    alias Move = PachnerMove!size_t;
+
+    foreach (step; 0 .. 50)
+    {
+        auto moves = tri.validMoves();
+        auto idx = uniform(0, moves.length, rng);
+        auto move = moves[idx];
+        if (move.type == Move.Type.move14)
+            move.newVertex = tri.nextVertexLabel();
+        move.execute(tri);
+
+        // Verify tracked counts match full recount
+        auto v = tri.nVertices;
+        auto e = tri.nEdges;
+        auto f = tri.nTriangles;
+        auto t = tri.nTetrahedra;
+        tri.recount();
+        assert(tri.nVertices == v);
+        assert(tri.nEdges == e);
+        assert(tri.nTriangles == f);
+        assert(tri.nTetrahedra == t);
+    }
 }
 
 unittest
