@@ -2,57 +2,30 @@
  * Simplex representation for 3-manifold triangulations.
  *
  * A 3-manifold triangulation is built from tetrahedra (3-simplices).
- * Each tetrahedron has 4 vertices, 6 edges, 4 triangular faces (2-simplices),
- * and is glued to neighbors across its faces.
+ * Each tetrahedron has 4 vertices. Gluings between tetrahedra are
+ * determined implicitly by shared vertex labels — two tetrahedra
+ * sharing 3 vertex labels are glued along that common face.
  */
 module pachner.simplex;
 
-import std.algorithm : sort, canFind;
-import std.array : array;
-import std.exception : enforce;
-
-/// A vertex label (non-negative integer index)
-alias VertexIndex = size_t;
-
-/// A tetrahedron index within the triangulation
-alias TetIndex = size_t;
-
-/// Invalid/null index sentinel
-enum size_t NULL_INDEX = size_t.max;
+import std.algorithm : sort;
 
 /**
- * Represents a single tetrahedron (3-simplex) in a triangulation.
+ * A tetrahedron (3-simplex) defined by 4 vertex labels.
  *
- * Vertices are labeled 0..3 locally. Face i is opposite vertex i,
- * i.e., the face spanned by vertices {0,1,2,3} \ {i}.
- *
- * Gluings: neighbor[i] is the tetrahedron glued along face i,
- * and gluing[i] maps local vertex indices to neighbor[i]'s local indices.
+ * Templated on the vertex label type for flexibility (e.g., size_t,
+ * int, string, or a custom identifier type).
  */
-struct Tetrahedron
+struct Tetrahedron(VertexLabel = size_t)
 {
-    /// Global index of this tetrahedron in the triangulation
-    TetIndex index;
+    /// The 4 vertex labels of this tetrahedron
+    VertexLabel[4] vertices;
 
-    /// Global vertex labels for the 4 local vertices (0..3)
-    VertexIndex[4] vertices;
-
-    /// Neighboring tetrahedron index across each face (NULL_INDEX if boundary)
-    TetIndex[4] neighbor = [NULL_INDEX, NULL_INDEX, NULL_INDEX, NULL_INDEX];
-
-    /**
-     * Gluing permutation for each face.
-     * gluing[i][j] = local vertex in neighbor[i] corresponding to local vertex j
-     * of this tetrahedron (restricted to the shared face).
-     * Stored as a permutation of {0,1,2,3}.
-     */
-    ubyte[4][4] gluing;
-
-    /// Returns the face (as sorted vertex indices) opposite to local vertex v
-    VertexIndex[3] face(ubyte v) const
+    /// Returns the face (as sorted vertex labels) opposite to local vertex v
+    VertexLabel[3] face(ubyte v) const
     in (v < 4)
     {
-        VertexIndex[3] f;
+        VertexLabel[3] f;
         size_t k = 0;
         foreach (i; 0 .. 4)
             if (i != v)
@@ -61,19 +34,19 @@ struct Tetrahedron
         return f;
     }
 
-    /// True if face i is a boundary face (no neighbor)
-    bool isBoundaryFace(ubyte i) const
-    in (i < 4)
+    /// Returns all 4 faces (each as sorted vertex labels)
+    VertexLabel[3][4] faces() const
     {
-        return neighbor[i] == NULL_INDEX;
+        VertexLabel[3][4] result;
+        foreach (v; 0 .. 4)
+            result[v] = face(cast(ubyte) v);
+        return result;
     }
 }
 
 unittest
 {
-    Tetrahedron t;
-    t.index = 0;
-    t.vertices = [0, 1, 2, 3];
+    auto t = Tetrahedron!size_t([0, 1, 2, 3]);
 
     auto f = t.face(0);
     assert(f == [1, 2, 3]);
@@ -81,7 +54,18 @@ unittest
     f = t.face(3);
     assert(f == [0, 1, 2]);
 
-    assert(t.isBoundaryFace(0));
-    t.neighbor[0] = 1;
-    assert(!t.isBoundaryFace(0));
+    auto allFaces = t.faces();
+    assert(allFaces[0] == [1, 2, 3]);
+    assert(allFaces[1] == [0, 2, 3]);
+    assert(allFaces[2] == [0, 1, 3]);
+    assert(allFaces[3] == [0, 1, 2]);
+}
+
+unittest
+{
+    // Test with string vertex labels
+    auto t = Tetrahedron!string(["a", "b", "c", "d"]);
+
+    auto f = t.face(0);
+    assert(f == ["b", "c", "d"]);
 }
