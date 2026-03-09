@@ -15,7 +15,7 @@ module pachner.triangulation;
 
 import pachner.simplex;
 
-import std.algorithm : canFind, remove, sort;
+import std.algorithm : canFind, max, reduce, remove, sort;
 import std.array : array;
 import std.stdio : writefln;
 
@@ -307,6 +307,187 @@ struct Triangulation(VertexLabel = size_t)
         return true;
     }
 
+    /// Returns a vertex label not currently used by any tetrahedron.
+    /// Only available for integral VertexLabel types.
+    static if (__traits(isIntegral, VertexLabel))
+    VertexLabel nextVertexLabel() const
+    {
+        if (tets.length == 0)
+            return 0;
+        VertexLabel maxLabel = tets[0].vertices[0];
+        foreach (ref t; tets)
+            foreach (v; t.vertices)
+                if (v > maxLabel)
+                    maxLabel = v;
+        return cast(VertexLabel)(maxLabel + 1);
+    }
+
+    /// Collect all distinct vertex labels used in the triangulation
+    VertexLabel[] vertexLabels() const
+    {
+        VertexLabel[] labels;
+        foreach (ref t; tets)
+            foreach (v; t.vertices)
+                if (!canFind(labels, v))
+                    labels ~= v;
+        sort(labels);
+        return labels;
+    }
+
+    /// Collect all distinct edges (pairs of vertex labels) in the triangulation
+    VertexLabel[2][] edges() const
+    {
+        VertexLabel[2][] result;
+        foreach (ref t; tets)
+        {
+            foreach (i; 0 .. 4)
+                foreach (j; i + 1 .. 4)
+                {
+                    VertexLabel[2] edge = [t.vertices[i], t.vertices[j]];
+                    sort(edge[]);
+                    bool found = false;
+                    foreach (ref e; result)
+                        if (e == edge) { found = true; break; }
+                    if (!found)
+                        result ~= edge;
+                }
+        }
+        return result;
+    }
+
+    /**
+     * Returns all valid Pachner moves for the current triangulation.
+     *
+     * Each move is represented as a PachnerMove tagged union that
+     * records the move type and its parameters.
+     */
+    PachnerMove!VertexLabel[] validMoves() const
+    {
+        PachnerMove!VertexLabel[] moves;
+
+        // 1-4 moves: one per tetrahedron (always valid since we use a fresh vertex)
+        // Only available for integral vertex label types
+        static if (__traits(isIntegral, VertexLabel))
+        {
+            VertexLabel fresh = nextVertexLabel();
+            foreach (i; 0 .. tets.length)
+            {
+                moves ~= PachnerMove!VertexLabel.make14(i, fresh);
+            }
+        }
+
+        // 2-3 moves: for each pair of tets sharing exactly 3 vertices
+        foreach (i; 0 .. tets.length)
+            foreach (j; i + 1 .. tets.length)
+            {
+                auto v1 = tets[i].vertices;
+                auto v2 = tets[j].vertices;
+
+                VertexLabel[] common;
+                foreach (u; v1)
+                    if (canFind(v2[], u) && !canFind(common, u))
+                        common ~= u;
+
+                if (common.length != 3)
+                    continue;
+
+                // Find non-shared vertices
+                VertexLabel d, e;
+                foreach (u; v1)
+                    if (!canFind(common, u)) d = u;
+                foreach (u; v2)
+                    if (!canFind(common, u)) e = u;
+
+                // Check validity: edge [d,e] must not exist in surviving tets
+                if (!hasSimplexContaining([d, e], [i, j]))
+                    moves ~= PachnerMove!VertexLabel.make23(i, j, common[0 .. 3], d, e);
+            }
+
+        // 3-2 moves: for each edge with exactly 3 tets around it
+        auto allEdges = edges();
+        foreach (ref edge; allEdges)
+        {
+            size_t[] tetIndices;
+            foreach (i, ref t; tets)
+                if (canFind(t.vertices[], edge[0]) && canFind(t.vertices[], edge[1]))
+                    tetIndices ~= i;
+
+            if (tetIndices.length != 3)
+                continue;
+
+            // Collect outer vertices
+            VertexLabel[] outer;
+            foreach (idx; tetIndices)
+                foreach (u; tets[idx].vertices)
+                    if (u != edge[0] && u != edge[1] && !canFind(outer, u))
+                        outer ~= u;
+
+            if (outer.length != 3)
+                continue;
+
+            // Verify each tet has exactly 2 outer vertices
+            bool valid = true;
+            foreach (idx; tetIndices)
+            {
+                int outerCount = 0;
+                foreach (u; tets[idx].vertices)
+                    if (canFind(outer, u))
+                        outerCount++;
+                if (outerCount != 2) { valid = false; break; }
+            }
+            if (!valid) continue;
+
+            // Check validity: face [a,b,c] must not exist in surviving tets
+            if (!hasSimplexContaining(outer, tetIndices))
+                moves ~= PachnerMove!VertexLabel.make32(edge, outer[0 .. 3]);
+        }
+
+        // 4-1 moves: for each vertex with exactly 4 tets around it
+        auto allVerts = vertexLabels();
+        foreach (v; allVerts)
+        {
+            size_t[] tetIndices;
+            foreach (i, ref t; tets)
+                if (canFind(t.vertices[], v))
+                    tetIndices ~= i;
+
+            if (tetIndices.length != 4)
+                continue;
+
+            VertexLabel[] outer;
+            foreach (idx; tetIndices)
+                foreach (u; tets[idx].vertices)
+                    if (u != v && !canFind(outer, u))
+                        outer ~= u;
+
+            if (outer.length != 4)
+                continue;
+
+            bool valid = true;
+            foreach (idx; tetIndices)
+            {
+                int outerCount = 0;
+                foreach (u; tets[idx].vertices)
+                    if (canFind(outer, u))
+                        outerCount++;
+                if (outerCount != 3) { valid = false; break; }
+            }
+            if (!valid) continue;
+
+            moves ~= PachnerMove!VertexLabel.make41(v, outer[0 .. 4]);
+        }
+
+        return moves;
+    }
+
+    /// Return a deep copy of this triangulation
+    Triangulation dup() const
+    {
+        Triangulation copy;
+        copy.tets = tets.dup;
+        return copy;
+    }
+
     /// Pretty-print summary
     void print() const
     {
@@ -314,6 +495,151 @@ struct Triangulation(VertexLabel = size_t)
         foreach (i, ref t; tets)
         {
             writefln("  Tet %d: %s", i, t.vertices);
+        }
+    }
+}
+
+/**
+ * Tagged union representing a Pachner move and its parameters.
+ * Stores enough information to perform the move and compute its inverse.
+ */
+struct PachnerMove(VertexLabel = size_t)
+{
+    enum Type { move14, move41, move23, move32 }
+    Type type;
+
+    // 1-4 / 4-1 parameters
+    size_t tetIdx;        // tet index for 1-4
+    VertexLabel newVertex; // new vertex for 1-4, vertex to remove for 4-1
+    VertexLabel[4] outerVertices; // outer vertices for 4-1
+
+    // 2-3 / 3-2 parameters
+    size_t tetIdx1, tetIdx2;     // tet indices for 2-3
+    VertexLabel[3] faceVertices; // shared face for 2-3, outer vertices for 3-2
+    VertexLabel[2] edgeVertices; // edge [d,e] for 2-3, shared edge for 3-2
+
+    static PachnerMove make14(size_t tetIdx, VertexLabel newVertex)
+    {
+        PachnerMove m;
+        m.type = Type.move14;
+        m.tetIdx = tetIdx;
+        m.newVertex = newVertex;
+        return m;
+    }
+
+    static PachnerMove make41(VertexLabel v, VertexLabel[4] outer)
+    {
+        PachnerMove m;
+        m.type = Type.move41;
+        m.newVertex = v;
+        m.outerVertices = outer;
+        return m;
+    }
+
+    static PachnerMove make23(size_t i, size_t j, VertexLabel[3] face, VertexLabel d, VertexLabel e)
+    {
+        PachnerMove m;
+        m.type = Type.move23;
+        m.tetIdx1 = i;
+        m.tetIdx2 = j;
+        m.faceVertices = face;
+        m.edgeVertices = [d, e];
+        return m;
+    }
+
+    static PachnerMove make32(VertexLabel[2] edge, VertexLabel[3] outer)
+    {
+        PachnerMove m;
+        m.type = Type.move32;
+        m.edgeVertices = edge;
+        m.faceVertices = outer;
+        return m;
+    }
+
+    /// Returns the inverse move that undoes this one.
+    PachnerMove inverse() const
+    {
+        PachnerMove inv;
+        final switch (type)
+        {
+            case Type.move14:
+                // Inverse of 1-4 is 4-1 on the new vertex
+                inv.type = Type.move41;
+                inv.newVertex = newVertex;
+                // outerVertices not known here; will be resolved at execution
+                break;
+            case Type.move41:
+                // Inverse of 4-1 is 1-4 on the resulting tet
+                inv.type = Type.move14;
+                inv.newVertex = newVertex;
+                inv.outerVertices = outerVertices;
+                // tetIdx will need to be found at execution
+                break;
+            case Type.move23:
+                // Inverse of 2-3 is 3-2 on edge [d,e]
+                inv.type = Type.move32;
+                inv.edgeVertices = edgeVertices;
+                inv.faceVertices = faceVertices;
+                break;
+            case Type.move32:
+                // Inverse of 3-2 is 2-3 on the two tets sharing face
+                inv.type = Type.move23;
+                inv.edgeVertices = edgeVertices;
+                inv.faceVertices = faceVertices;
+                // tetIdx1/2 will need to be found at execution
+                break;
+        }
+        return inv;
+    }
+
+    /// Find the index of a tet matching the given sorted vertices, or size_t.max
+    private static size_t findTet(ref const Triangulation!VertexLabel tri, VertexLabel[4] sorted)
+    {
+        foreach (i, ref t; tri.tets)
+            if (t.sortedVertices() == sorted)
+                return i;
+        return size_t.max;
+    }
+
+    /// Execute this move on the given triangulation. Returns true on success.
+    bool execute(ref Triangulation!VertexLabel tri)
+    {
+        final switch (type)
+        {
+            case Type.move14:
+                // Find the tet by vertex content if outerVertices is set
+                size_t idx = tetIdx;
+                if (outerVertices != typeof(outerVertices).init)
+                {
+                    VertexLabel[4] sorted = outerVertices;
+                    sort(sorted[]);
+                    idx = findTet(tri, sorted);
+                    if (idx == size_t.max) return false;
+                }
+                auto result = tri.move14(idx, newVertex);
+                return result[0] != size_t.max;
+
+            case Type.move41:
+                return tri.move41(newVertex);
+
+            case Type.move23:
+                // Find the two tets by their vertex content
+                VertexLabel[4] tet1verts, tet2verts;
+                foreach (i; 0 .. 3) tet1verts[i] = faceVertices[i];
+                tet1verts[3] = edgeVertices[0];
+                foreach (i; 0 .. 3) tet2verts[i] = faceVertices[i];
+                tet2verts[3] = edgeVertices[1];
+                sort(tet1verts[]);
+                sort(tet2verts[]);
+
+                auto idx1 = findTet(tri, tet1verts);
+                auto idx2 = findTet(tri, tet2verts);
+                if (idx1 == size_t.max || idx2 == size_t.max)
+                    return false;
+                return tri.move23(idx1, idx2);
+
+            case Type.move32:
+                return tri.move32(edgeVertices[0], edgeVertices[1]);
         }
     }
 }
@@ -373,7 +699,7 @@ unittest
     Triangulation!size_t tri;
     tri.addTetrahedron([0, 1, 2, 3]);
 
-    Triangulation!size_t original = tri;
+    auto original = tri.dup;
     tri.move14(0, 4);
     assert(tri.size == 4);
 
@@ -448,7 +774,7 @@ unittest
     tri.addTetrahedron([0, 1, 2, 3]);
     tri.addTetrahedron([0, 1, 2, 4]);
 
-    Triangulation!size_t original = tri;
+    auto original = tri.dup;
 
     tri.move23(0, 1);
     assert(tri.size == 3);
@@ -466,7 +792,7 @@ unittest
     tri.addTetrahedron([0, 2, 3, 4]);
     tri.addTetrahedron([1, 2, 3, 4]);
 
-    Triangulation!size_t original = tri;
+    auto original = tri.dup;
 
     tri.move32(3, 4);
     assert(tri.size == 2);
@@ -545,4 +871,72 @@ unittest
     a.addTetrahedron([0, 1, 2, 3]);
     b.addTetrahedron([0, 1, 2, 4]);
     assert(a != b);
+}
+
+/// Build the boundary of the 4-simplex [0,1,2,3,4] — a triangulation of S^3
+Triangulation!size_t fourSimplexBoundary()
+{
+    Triangulation!size_t tri;
+    // 5 tetrahedra, each omitting one vertex from {0,1,2,3,4}
+    tri.addTetrahedron([1, 2, 3, 4]);
+    tri.addTetrahedron([0, 2, 3, 4]);
+    tri.addTetrahedron([0, 1, 3, 4]);
+    tri.addTetrahedron([0, 1, 2, 4]);
+    tri.addTetrahedron([0, 1, 2, 3]);
+    return tri;
+}
+
+unittest
+{
+    // Verify 4-simplex boundary has expected structure
+    auto tri = fourSimplexBoundary();
+    assert(tri.size == 5);
+    assert(tri.vertexLabels() == [0, 1, 2, 3, 4]);
+
+    // Should have valid moves available
+    auto moves = tri.validMoves();
+    assert(moves.length > 0);
+}
+
+unittest
+{
+    import std.random : Random, uniform;
+
+    // Random walk of 100 Pachner moves starting from the 4-simplex boundary,
+    // then undo all moves in reverse to recover the original.
+    auto tri = fourSimplexBoundary();
+    auto original = tri.dup;
+
+    alias Move = PachnerMove!size_t;
+    Move[] history;
+    auto rng = Random(42); // fixed seed for reproducibility
+
+    // Perform 100 random moves
+    foreach (step; 0 .. 100)
+    {
+        auto moves = tri.validMoves();
+        assert(moves.length > 0, "No valid moves available at step " ~ (cast(int) step).stringof);
+
+        // Pick a random valid move
+        auto idx = uniform(0, moves.length, rng);
+        auto move = moves[idx];
+
+        // For 1-4 moves, use nextVertexLabel for the new vertex
+        if (move.type == Move.Type.move14)
+            move.newVertex = tri.nextVertexLabel();
+
+        bool ok = move.execute(tri);
+        assert(ok, "Move execution failed at step " ~ (cast(int) step).stringof);
+        history ~= move;
+    }
+
+    // Undo all moves in reverse order
+    foreach_reverse (ref move; history)
+    {
+        auto inv = move.inverse();
+        bool ok = inv.execute(tri);
+        assert(ok, "Inverse move failed");
+    }
+
+    assert(tri == original, "Triangulation not recovered after undoing all moves");
 }
