@@ -38,6 +38,16 @@ struct Triangulation(VertexLabel = size_t)
     size_t nTriangles;
     size_t nTetrahedra;
 
+    /// Degree maps: number of tetrahedra containing each vertex/edge
+    size_t[VertexLabel] vertexDegrees;
+    size_t[VertexLabel[2]] edgeDegrees;
+
+    /// Running sums for variance computation (avoid full iteration)
+    long vertexDegreeSum;
+    long vertexDegreeSqSum;
+    long edgeDegreeSum;
+    long edgeDegreeSqSum;
+
     /// Add a tetrahedron with the given vertex labels
     size_t addTetrahedron(VertexLabel[4] verts)
     {
@@ -49,35 +59,89 @@ struct Triangulation(VertexLabel = size_t)
     /// Number of tetrahedra
     size_t size() const { return tets.length; }
 
-    /// Recompute f-vector counts from scratch by enumerating all
-    /// distinct vertices, edges, and triangles across all tetrahedra.
+    /// Return a sorted edge key for use in the edgeDegrees AA
+    static VertexLabel[2] edgeKey(VertexLabel a, VertexLabel b)
+    {
+        VertexLabel[2] e = [a, b];
+        sort(e[]);
+        return e;
+    }
+
+    /// Update degree tracking when a tetrahedron is added (+1) or removed (-1)
+    private void adjustDegrees(VertexLabel[4] verts, int delta)
+    {
+        // Update vertex degrees
+        foreach (v; verts)
+        {
+            auto p = v in vertexDegrees;
+            long oldDeg = p ? cast(long) *p : 0;
+            long newDeg = oldDeg + delta;
+
+            vertexDegreeSum += delta;
+            vertexDegreeSqSum += newDeg * newDeg - oldDeg * oldDeg;
+
+            if (newDeg > 0)
+                vertexDegrees[v] = cast(size_t) newDeg;
+            else if (p)
+                vertexDegrees.remove(v);
+        }
+        nVertices = vertexDegrees.length;
+
+        // Update edge degrees (6 edges per tet)
+        foreach (i; 0 .. 4)
+            foreach (j; i + 1 .. 4)
+            {
+                auto ek = edgeKey(verts[i], verts[j]);
+                auto p = ek in edgeDegrees;
+                long oldDeg = p ? cast(long) *p : 0;
+                long newDeg = oldDeg + delta;
+
+                edgeDegreeSum += delta;
+                edgeDegreeSqSum += newDeg * newDeg - oldDeg * oldDeg;
+
+                if (newDeg > 0)
+                    edgeDegrees[ek] = cast(size_t) newDeg;
+                else if (p)
+                    edgeDegrees.remove(ek);
+            }
+        nEdges = edgeDegrees.length;
+    }
+
+    /// Variance of vertex degrees (number of tets per vertex)
+    double vertexDegreeVariance() const
+    {
+        if (nVertices == 0) return 0.0;
+        double n = cast(double) nVertices;
+        double mean = cast(double) vertexDegreeSum / n;
+        return cast(double) vertexDegreeSqSum / n - mean * mean;
+    }
+
+    /// Variance of edge degrees (number of tets per edge)
+    double edgeDegreeVariance() const
+    {
+        if (nEdges == 0) return 0.0;
+        double n = cast(double) nEdges;
+        double mean = cast(double) edgeDegreeSum / n;
+        return cast(double) edgeDegreeSqSum / n - mean * mean;
+    }
+
+    /// Recompute all counts and degree maps from scratch.
     void recount()
     {
         nTetrahedra = tets.length;
 
-        // Count distinct vertices
-        VertexLabel[] verts;
-        foreach (ref t; tets)
-            foreach (v; t.vertices)
-                if (!canFind(verts, v))
-                    verts ~= v;
-        nVertices = verts.length;
+        // Rebuild degree maps
+        vertexDegrees = typeof(vertexDegrees).init;
+        edgeDegrees = typeof(edgeDegrees).init;
+        vertexDegreeSum = 0;
+        vertexDegreeSqSum = 0;
+        edgeDegreeSum = 0;
+        edgeDegreeSqSum = 0;
 
-        // Count distinct edges (sorted pairs)
-        VertexLabel[2][] edgeList;
         foreach (ref t; tets)
-            foreach (i; 0 .. 4)
-                foreach (j; i + 1 .. 4)
-                {
-                    VertexLabel[2] e = [t.vertices[i], t.vertices[j]];
-                    sort(e[]);
-                    bool found = false;
-                    foreach (ref existing; edgeList)
-                        if (existing == e) { found = true; break; }
-                    if (!found)
-                        edgeList ~= e;
-                }
-        nEdges = edgeList.length;
+            adjustDegrees(t.vertices, +1);
+
+        // nVertices and nEdges are set by adjustDegrees
 
         // Count distinct triangles (sorted triples)
         VertexLabel[3][] triList;
@@ -160,6 +224,7 @@ struct Triangulation(VertexLabel = size_t)
             return [size_t.max, size_t.max, size_t.max, size_t.max];
 
         VertexLabel[4] orig = tets[tetIdx].vertices;
+        adjustDegrees(orig, -1);
         removeTetrahedron(tetIdx);
 
         size_t[4] newIndices;
@@ -168,13 +233,12 @@ struct Triangulation(VertexLabel = size_t)
             VertexLabel[4] verts = orig;
             verts[i] = v;
             newIndices[i] = addTetrahedron(verts);
+            adjustDegrees(verts, +1);
         }
 
-        // f-vector delta: +1 vertex, +4 edges, +6 triangles, +3 tets
-        nVertices += 1;
-        nEdges += 4;
+        // Triangle delta: +6 (6 new internal triangles containing v)
         nTriangles += 6;
-        nTetrahedra += 3;
+        nTetrahedra = tets.length;
 
         return newIndices;
     }
@@ -222,18 +286,20 @@ struct Triangulation(VertexLabel = size_t)
         }
 
         // Remove the 4 tets (remove from highest index first to preserve indices)
+        // Adjust degrees before removing
+        foreach (idx; tetIndices)
+            adjustDegrees(tets[idx].vertices, -1);
         sort!"a > b"(tetIndices);
         foreach (idx; tetIndices)
             removeTetrahedron(idx);
 
         // Add the single replacement tetrahedron
-        addTetrahedron(outer[0 .. 4]);
+        VertexLabel[4] newVerts = outer[0 .. 4];
+        addTetrahedron(newVerts);
+        adjustDegrees(newVerts, +1);
 
-        // f-vector delta: -1 vertex, -4 edges, -6 triangles, -3 tets
-        nVertices -= 1;
-        nEdges -= 4;
         nTriangles -= 6;
-        nTetrahedra -= 3;
+        nTetrahedra = tets.length;
 
         return true;
     }
@@ -284,6 +350,10 @@ struct Triangulation(VertexLabel = size_t)
         if (hasSimplexContaining([d, e], [tetIdx1, tetIdx2]))
             return false;
 
+        // Adjust degrees for removed tets
+        adjustDegrees(v1, -1);
+        adjustDegrees(v2, -1);
+
         // Remove both tets (higher index first)
         if (tetIdx1 > tetIdx2)
         {
@@ -307,12 +377,11 @@ struct Triangulation(VertexLabel = size_t)
             verts[2] = d;
             verts[3] = e;
             addTetrahedron(verts);
+            adjustDegrees(verts, +1);
         }
 
-        // f-vector delta: +0 vertices, +1 edge, +2 triangles, +1 tet
-        nEdges += 1;
         nTriangles += 2;
-        nTetrahedra += 1;
+        nTetrahedra = tets.length;
 
         return true;
     }
@@ -364,19 +433,29 @@ struct Triangulation(VertexLabel = size_t)
         if (hasSimplexContaining(outer, tetIndices))
             return false;
 
+        // Adjust degrees for removed tets
+        // Need to read vertices before sorting tetIndices
+        VertexLabel[4][3] removedVerts;
+        foreach (i, idx; tetIndices)
+            removedVerts[i] = tets[idx].vertices;
+        foreach (ref rv; removedVerts)
+            adjustDegrees(rv, -1);
+
         // Remove the 3 tets (highest index first)
         sort!"a > b"(tetIndices);
         foreach (idx; tetIndices)
             removeTetrahedron(idx);
 
         // Add 2 new tets
-        addTetrahedron([outer[0], outer[1], outer[2], d]);
-        addTetrahedron([outer[0], outer[1], outer[2], e]);
+        VertexLabel[4] newTet1 = [outer[0], outer[1], outer[2], d];
+        VertexLabel[4] newTet2 = [outer[0], outer[1], outer[2], e];
+        addTetrahedron(newTet1);
+        adjustDegrees(newTet1, +1);
+        addTetrahedron(newTet2);
+        adjustDegrees(newTet2, +1);
 
-        // f-vector delta: +0 vertices, -1 edge, -2 triangles, -1 tet
-        nEdges -= 1;
         nTriangles -= 2;
-        nTetrahedra -= 1;
+        nTetrahedra = tets.length;
 
         return true;
     }
@@ -563,6 +642,12 @@ struct Triangulation(VertexLabel = size_t)
         copy.nEdges = nEdges;
         copy.nTriangles = nTriangles;
         copy.nTetrahedra = nTetrahedra;
+        copy.vertexDegrees = cast(size_t[VertexLabel]) vertexDegrees.dup;
+        copy.edgeDegrees = cast(size_t[VertexLabel[2]]) edgeDegrees.dup;
+        copy.vertexDegreeSum = vertexDegreeSum;
+        copy.vertexDegreeSqSum = vertexDegreeSqSum;
+        copy.edgeDegreeSum = edgeDegreeSum;
+        copy.edgeDegreeSqSum = edgeDegreeSqSum;
         return copy;
     }
 
@@ -1064,6 +1149,78 @@ unittest
         assert(tri.nEdges == e);
         assert(tri.nTriangles == f);
         assert(tri.nTetrahedra == t);
+    }
+}
+
+unittest
+{
+    // Degree tracking for 4-simplex boundary
+    auto tri = fourSimplexBoundary();
+
+    // Each vertex is in 4 tets (every tet except the one that omits it)
+    foreach (v; 0 .. 5)
+        assert(tri.vertexDegrees[v] == 4);
+
+    // Each edge is in 3 tets (every tet containing both endpoints)
+    assert(tri.edgeDegrees.length == 10);
+    foreach (ref pair; tri.edgeDegrees.byKeyValue())
+        assert(pair.value == 3);
+
+    // Variance should be 0 since all degrees are equal
+    import std.math : abs;
+    assert(abs(tri.vertexDegreeVariance()) < 1e-10);
+    assert(abs(tri.edgeDegreeVariance()) < 1e-10);
+}
+
+unittest
+{
+    // After 1-4 move, degrees become non-uniform
+    auto tri = fourSimplexBoundary();
+    tri.move14(0, 5);
+
+    // New vertex 5 should be in exactly 4 tets
+    assert(tri.vertexDegrees[5] == 4);
+
+    // Variance should be > 0 since degrees are now non-uniform
+    assert(tri.vertexDegreeVariance() > 0);
+    assert(tri.edgeDegreeVariance() > 0);
+}
+
+unittest
+{
+    import std.random : Random, uniform;
+    import std.math : abs;
+
+    // Verify degree variance tracking matches recount through random walk
+    auto tri = fourSimplexBoundary();
+    auto rng = Random(99);
+    alias Move = PachnerMove!size_t;
+
+    foreach (step; 0 .. 50)
+    {
+        auto moves = tri.validMoves();
+        auto idx = uniform(0, moves.length, rng);
+        auto move = moves[idx];
+        if (move.type == Move.Type.move14)
+            move.newVertex = tri.nextVertexLabel();
+        move.execute(tri);
+
+        // Save tracked values
+        auto vVar = tri.vertexDegreeVariance();
+        auto eVar = tri.edgeDegreeVariance();
+        auto vSum = tri.vertexDegreeSum;
+        auto vSqSum = tri.vertexDegreeSqSum;
+        auto eSum = tri.edgeDegreeSum;
+        auto eSqSum = tri.edgeDegreeSqSum;
+
+        // Recount and compare
+        tri.recount();
+        assert(tri.vertexDegreeSum == vSum);
+        assert(tri.vertexDegreeSqSum == vSqSum);
+        assert(tri.edgeDegreeSum == eSum);
+        assert(tri.edgeDegreeSqSum == eSqSum);
+        assert(abs(tri.vertexDegreeVariance() - vVar) < 1e-10);
+        assert(abs(tri.edgeDegreeVariance() - eVar) < 1e-10);
     }
 }
 
