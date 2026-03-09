@@ -15,7 +15,7 @@ module pachner.triangulation;
 
 import pachner.simplex;
 
-import std.algorithm : remove, sort;
+import std.algorithm : canFind, remove, sort;
 import std.stdio : writefln;
 
 /**
@@ -78,6 +78,59 @@ struct Triangulation(VertexLabel = size_t)
         return newIndices;
     }
 
+    /**
+     * Perform a 4-1 Pachner move, removing vertex v.
+     *
+     * Finds all tetrahedra containing v. If there are exactly 4 and
+     * they share exactly 4 distinct non-v vertices (each tet using 3
+     * of them), removes the 4 tetrahedra and replaces them with a
+     * single tetrahedron on the 4 outer vertices.
+     *
+     * Returns: true if the move was performed, false if preconditions fail.
+     */
+    bool move41(VertexLabel v)
+    {
+        // Find all tetrahedra containing v
+        size_t[] tetIndices;
+        foreach (i, ref t; tets)
+            if (canFind(t.vertices[], v))
+                tetIndices ~= i;
+
+        if (tetIndices.length != 4)
+            return false;
+
+        // Collect all distinct non-v vertices
+        VertexLabel[] outer;
+        foreach (idx; tetIndices)
+            foreach (u; tets[idx].vertices)
+                if (u != v && !canFind(outer, u))
+                    outer ~= u;
+
+        if (outer.length != 4)
+            return false;
+
+        // Verify each tet has exactly 3 of the outer vertices (plus v)
+        foreach (idx; tetIndices)
+        {
+            int outerCount = 0;
+            foreach (u; tets[idx].vertices)
+                if (canFind(outer, u))
+                    outerCount++;
+            if (outerCount != 3)
+                return false;
+        }
+
+        // Remove the 4 tets (remove from highest index first to preserve indices)
+        sort!"a > b"(tetIndices);
+        foreach (idx; tetIndices)
+            removeTetrahedron(idx);
+
+        // Add the single replacement tetrahedron
+        addTetrahedron(outer[0 .. 4]);
+
+        return true;
+    }
+
     /// Pretty-print summary
     void print() const
     {
@@ -137,3 +190,34 @@ unittest
         assert(origCount == 3);
     }
 }
+
+unittest
+{
+    // 4-1 move: four tets become one (round-trip with 1-4)
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    tri.move14(0, 4);
+    assert(tri.size == 4);
+
+    bool ok = tri.move41(4);
+    assert(ok);
+    assert(tri.size == 1);
+
+    // The remaining tet should have exactly the original 4 vertices
+    VertexLabel[] verts;
+    foreach (u; tri.tets[0].vertices)
+        if (!canFind(verts, u))
+            verts ~= u;
+    sort(verts);
+    assert(verts == [0, 1, 2, 3]);
+}
+
+unittest
+{
+    // 4-1 move should fail if vertex doesn't have exactly 4 tets
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    assert(!tri.move41(0)); // vertex 0 is in only 1 tet
+}
+
+private alias VertexLabel = size_t; // for unittest visibility
