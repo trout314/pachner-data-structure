@@ -4,6 +4,7 @@ dub.selections.json
 
 # Build artifacts
 pachner_data_structure
+pachner_data_structure-test-library
 *.o
 *.a
 *.so
