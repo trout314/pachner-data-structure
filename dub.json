@@ -1,0 +1,9 @@
+{
+	"authors": [
+		"Aaron Trout"
+	],
+	"description": "Data structure for storing 3-manifold triangulations and performing Pachner (bistellar) moves.",
+	"license": "MIT",
+	"name": "pachner_data_structure",
+	"targetType": "library"
+}

@@ -1,0 +1,16 @@
+# DUB
+.dub/
+dub.selections.json
+
+# Build artifacts
+pachner_data_structure
+*.o
+*.a
+*.so
+*.lib
+
+# Editor files
+*~
+*.swp
+.vscode/
+.idea/
