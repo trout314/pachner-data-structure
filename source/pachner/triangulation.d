@@ -152,6 +152,131 @@ struct Triangulation(VertexLabel = size_t)
         return true;
     }
 
+    /**
+     * Perform a 2-3 Pachner move on two tetrahedra that share a face.
+     *
+     * Given tets [a,b,c,d] and [a,b,c,e] sharing face [a,b,c],
+     * replaces them with 3 tets sharing edge (d,e):
+     *   [a,b,d,e], [a,c,d,e], [b,c,d,e]
+     *
+     * The caller specifies the two tet indices. The move fails if
+     * they don't share exactly 3 vertex labels.
+     *
+     * Returns: true if the move was performed, false if preconditions fail.
+     */
+    bool move23(size_t tetIdx1, size_t tetIdx2)
+    {
+        if (tetIdx1 >= tets.length || tetIdx2 >= tets.length)
+            return false;
+        if (tetIdx1 == tetIdx2)
+            return false;
+
+        auto v1 = tets[tetIdx1].vertices;
+        auto v2 = tets[tetIdx2].vertices;
+
+        // Find shared and non-shared vertices
+        VertexLabel[] common;
+        foreach (u; v1)
+            if (canFind(v2[], u) && !canFind(common, u))
+                common ~= u;
+
+        if (common.length != 3)
+            return false;
+
+        // Find the non-shared vertex from each tet
+        VertexLabel d, e;
+        bool foundD = false, foundE = false;
+        foreach (u; v1)
+            if (!canFind(common, u)) { d = u; foundD = true; }
+        foreach (u; v2)
+            if (!canFind(common, u)) { e = u; foundE = true; }
+
+        if (!foundD || !foundE)
+            return false;
+
+        // Remove both tets (higher index first)
+        if (tetIdx1 > tetIdx2)
+        {
+            removeTetrahedron(tetIdx1);
+            removeTetrahedron(tetIdx2);
+        }
+        else
+        {
+            removeTetrahedron(tetIdx2);
+            removeTetrahedron(tetIdx1);
+        }
+
+        // Add 3 new tets, each with edge (d,e) and one edge of the shared triangle
+        foreach (i; 0 .. 3)
+        {
+            VertexLabel[4] verts;
+            size_t k = 0;
+            foreach (j; 0 .. 3)
+                if (j != i)
+                    verts[k++] = common[j];
+            verts[2] = d;
+            verts[3] = e;
+            addTetrahedron(verts);
+        }
+
+        return true;
+    }
+
+    /**
+     * Perform a 3-2 Pachner move on 3 tetrahedra sharing edge (d, e).
+     *
+     * Finds all tets containing both d and e. If there are exactly 3,
+     * and the 3 "other" vertices (excluding d and e) are all distinct,
+     * replaces them with 2 tets:
+     *   [a, b, c, d] and [a, b, c, e]
+     * where {a, b, c} are the 3 outer vertices.
+     *
+     * Returns: true if the move was performed, false if preconditions fail.
+     */
+    bool move32(VertexLabel d, VertexLabel e)
+    {
+        // Find all tets containing both d and e
+        size_t[] tetIndices;
+        foreach (i, ref t; tets)
+            if (canFind(t.vertices[], d) && canFind(t.vertices[], e))
+                tetIndices ~= i;
+
+        if (tetIndices.length != 3)
+            return false;
+
+        // Collect distinct non-{d,e} vertices
+        VertexLabel[] outer;
+        foreach (idx; tetIndices)
+            foreach (u; tets[idx].vertices)
+                if (u != d && u != e && !canFind(outer, u))
+                    outer ~= u;
+
+        if (outer.length != 3)
+            return false;
+
+        // Verify each tet has exactly 2 of the 3 outer vertices (plus d and e)
+        foreach (idx; tetIndices)
+        {
+            int outerCount = 0;
+            foreach (u; tets[idx].vertices)
+                if (canFind(outer, u))
+                    outerCount++;
+            if (outerCount != 2)
+                return false;
+        }
+
+        // Remove the 3 tets (highest index first)
+        sort!"a > b"(tetIndices);
+        foreach (idx; tetIndices)
+            removeTetrahedron(idx);
+
+        // Add 2 new tets
+        addTetrahedron([outer[0], outer[1], outer[2], d]);
+        addTetrahedron([outer[0], outer[1], outer[2], e]);
+
+        return true;
+    }
+
     /// Pretty-print summary
     void print() const
     {
@@ -233,6 +358,100 @@ unittest
     Triangulation!size_t tri;
     tri.addTetrahedron([0, 1, 2, 3]);
     assert(!tri.move41(0)); // vertex 0 is in only 1 tet
+}
+
+unittest
+{
+    // 2-3 move: two tets sharing a face become three
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    tri.addTetrahedron([0, 1, 2, 4]);
+    assert(tri.size == 2);
+
+    bool ok = tri.move23(0, 1);
+    assert(ok);
+    assert(tri.size == 3);
+
+    // Each new tet should contain both non-shared vertices (3 and 4)
+    foreach (ref t; tri.tets)
+    {
+        assert(canFind(t.vertices[], cast(size_t) 3));
+        assert(canFind(t.vertices[], cast(size_t) 4));
+    }
+}
+
+unittest
+{
+    // 2-3 move should fail if tets don't share exactly 3 vertices
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    tri.addTetrahedron([4, 5, 6, 7]);
+    assert(!tri.move23(0, 1));
+}
+
+unittest
+{
+    // 3-2 move: three tets sharing an edge become two
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 3, 4]);
+    tri.addTetrahedron([0, 2, 3, 4]);
+    tri.addTetrahedron([1, 2, 3, 4]);
+    assert(tri.size == 3);
+
+    bool ok = tri.move32(3, 4);
+    assert(ok);
+    assert(tri.size == 2);
+
+    // Each new tet should contain all 3 outer vertices (0, 1, 2)
+    foreach (ref t; tri.tets)
+    {
+        assert(canFind(t.vertices[], cast(size_t) 0));
+        assert(canFind(t.vertices[], cast(size_t) 1));
+        assert(canFind(t.vertices[], cast(size_t) 2));
+    }
+}
+
+unittest
+{
+    // 2-3 then 3-2 round-trip recovers original
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    tri.addTetrahedron([0, 1, 2, 4]);
+
+    Triangulation!size_t original = tri;
+
+    tri.move23(0, 1);
+    assert(tri.size == 3);
+
+    bool ok = tri.move32(3, 4);
+    assert(ok);
+    assert(tri == original);
+}
+
+unittest
+{
+    // 3-2 then 2-3 round-trip recovers original
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 3, 4]);
+    tri.addTetrahedron([0, 2, 3, 4]);
+    tri.addTetrahedron([1, 2, 3, 4]);
+
+    Triangulation!size_t original = tri;
+
+    tri.move32(3, 4);
+    assert(tri.size == 2);
+
+    bool ok = tri.move23(0, 1);
+    assert(ok);
+    assert(tri == original);
+}
+
+unittest
+{
+    // 3-2 move should fail if edge doesn't have exactly 3 tets
+    Triangulation!size_t tri;
+    tri.addTetrahedron([0, 1, 2, 3]);
+    assert(!tri.move32(2, 3)); // edge (2,3) is in only 1 tet
 }
 
 unittest
